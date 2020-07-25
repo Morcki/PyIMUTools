@@ -174,9 +174,12 @@ def getgravity(lat, h):
     return gama_n
 
 
-def DrMat(loc):
+def DrMat(loc, itype = 0):
     Rm, Rn = mcucradius(loc[0])
-    Dr = np.diag([Rm + loc[2], (Rn + loc[2]) * np.cos(loc[0]), -1])
+    if not itype:
+        Dr = np.diag([Rm + loc[2], (Rn + loc[2]) * np.cos(loc[0]), -1])
+    else:
+        Dr = np.diag([1 / (Rm + loc[2]), 1 / ((Rn + loc[2]) * np.cos(loc[0])), -1])
     return Dr
 
 

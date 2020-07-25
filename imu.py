@@ -219,6 +219,7 @@ class ImuUpd():
         
     def load_initstatus(self, fp):
         self.binf = fp
+        self.tim.append(self.imudata.init_ts)
         self.loc.append(self.imudata.init_loc)
         self.vel.append(self.imudata.init_vel)
         self.pos.append(self.imudata.init_pos)
@@ -239,9 +240,9 @@ class ImuUpd():
         
     
     def antenna_cor(self, imu_loc):
-        Dr_I = 1 / com.DrMat(imu_loc)
-        gloc_ = imu_loc + Dr_I @ self.rot @ self.config.antenna_arm
-        return gloc_
+        Dr_I = com.DrMat(imu_loc, 1)
+        gnss_imuloc = imu_loc + Dr_I @ self.rot @ self.config.antenna_arm
+        return gnss_imuloc
     
     def updepoch_imu(self):
         for t,ls_g,ls_a in self.imudata.loadbinepoch(self.binf):
@@ -249,6 +250,7 @@ class ImuUpd():
                 continue
             self.iep += 1
             if self.iep == 1:
+                yield self.tim[-1], self.pos[-1], self.vel[-1], self.loc[-1]
                 continue
             self.tim.append(t)
             loc_p = self.loc[-1]
@@ -293,11 +295,12 @@ class ImuUpd():
             # update status
             dx_ = PHI @ dx
             Qx_ = PHI @ Qx @ PHI.T + Qw
-            for tg, gnss_loc, loc_std in self.load_gnssstatus():
-                if np.abs(t - tg) < 1e-5:
-                    Hr, Rk = self.get_observation_equation_matrix(np.asarray(loc_std))        
-                    gnss_imuxyz = self.antenna_cor(loc_n)
-                    Z = gnss_imuxyz - gnss_loc
+            for tg, gnss_pureloc, gloc_std in self.load_gnssstatus():
+                if np.abs(t - tg) < 0.01:
+                    Dr = com.DrMat(loc_n)
+                    Hr, Rk = self.get_observation_equation_matrix(Dr @ gloc_std) 
+                    gnss_imuloc = self.antenna_cor(loc_n)
+                    Z = Dr @ (gnss_imuloc - gnss_pureloc)
                     S = Hr @ Qx_ @ Hr.T + Rk
                     K = Qx_ @ Hr.T @ np.linalg.inv(S)
                     break
@@ -311,12 +314,14 @@ class ImuUpd():
             temp = np.eye(len(x)) - K @ Hr
             Qx = temp @ Qx_ @ temp.T + K @ Rk @ K.T
             x += dx
-            Dr_I = 1 / com.DrMat(loc_n)
+            Dr_I = com.DrMat(loc_n, 1)
             dx[:3] = Dr_I @ dx[:3]
             for i in range(3):
                 self.loc[-1][i] += dx[i]
                 self.vel[-1][i] += dx[i + 3]
                 self.pos[-1][i] += dx[i + 6]
+            self.qua = com.euler2quater(self.pos[-1])
+            self.rot = com.quater2rotation(self.qua)
             yield x, Qx
             
     
@@ -328,7 +333,7 @@ class ImuUpd():
         return PHI, Qw
     
     def get_observation_equation_matrix(self, loc_std):
-        lb = np.array(self.config.antenna_arm)
+        lb = self.config.antenna_arm
         Hr = np.zeros((3, 3*7))
         Hr[:,:3] = np.identity(3)
         Hr[:,6:9] = com.antisym(self.rot @ lb)
@@ -406,7 +411,7 @@ class ImuUpd():
         omega_n_ie, omega_n_en = com.earthrotatvec(loc_n, vel_n)
         omega_n_in = omega_n_ie + omega_n_en
         
-        # ls_g = np.asarray(self.imudata.imu_gyo[-1])
+        ls_g = np.asarray(self.imudata.imu_gyo[-1])
         ls_a = np.asarray(self.imudata.imu_acc[-1])
         
         Frr = np.array([
@@ -415,16 +420,16 @@ class ImuUpd():
             [0, 0, 0]])
         Fvr = np.array([
             [-2*ve*glv.EARTH_ROTATE*np.cos(lat) / (Rm + h) - ve**2 / np.cos(lat)**2 / ((Rm + h)*(Rn + h)), 0, vn*vd/((Rm + h)**2) - ve**2*np.tan(lat)/((Rn + h)**2)],
-            [2*glv.EARTH_ROTATE*(vn*np.cos(lat) - vd*np.sin(lat))/(Rm + h) + vn*ve / np.cos(lat)**2 / ((Rm + h)*(Rn + h)), 0, ve*vd + (vn*ve*np.tan(lat)) / ((Rn + h)**2)],
+            [2*glv.EARTH_ROTATE*(vn*np.cos(lat) - vd*np.sin(lat))/(Rm + h) + vn*ve / np.cos(lat)**2 / ((Rm + h)*(Rn + h)), 0, (ve*vd + vn*ve*np.tan(lat)) / ((Rn + h)**2)],
             [2*glv.EARTH_ROTATE*ve*np.sin(lat) / (Rm + h), 0, -ve**2/((Rn + h)**2) - vn**2 / ((Rm + h)**2) + 2*gcc[2] / (np.sqrt(Rm * Rn) + h)]
             ])
         Fvv = np.array([
             [vd / (Rm + h), -2*(glv.EARTH_ROTATE * np.sin(lat) + ve*np.tan(lat) / (Rn + h)), vn / (Rm + h)],
-            [2*glv.EARTH_ROTATE*np.sin(lat) + ve * np.tan(lat) / (Rn + h), vd + vn * np.tan(lat) / (Rn + h), 2*glv.EARTH_ROTATE*np.cos(lat) + ve / (Rn + h)],
+            [2*glv.EARTH_ROTATE*np.sin(lat) + ve * np.tan(lat) / (Rn + h), (vd + vn * np.tan(lat)) / (Rn + h), 2*glv.EARTH_ROTATE*np.cos(lat) + ve / (Rn + h)],
             [-2*vn /( Rm + h), -2*(glv.EARTH_ROTATE*np.cos(lat) + ve / (Rn + h)), 0]
             ])
         Fphir = np.array([
-            [-glv.EARTH_ROTATE*np.sin(lat), 0, ve / ((Rn + h)**2)],
+            [-glv.EARTH_ROTATE*np.sin(lat) / (Rm + h), 0, ve / ((Rn + h)**2)],
             [0, 0, -vn / ((Rm + h)**2)],
             [-glv.EARTH_ROTATE*np.cos(lat) / (Rm + h) - ve / np.cos(lat)**2 / ((Rm + h)*(Rn + h)), 0, -ve*np.tan(lat) / ((Rn + h)**2)]
             ])
@@ -446,21 +451,21 @@ class ImuUpd():
         F[6:9,9:12] = -self.rot
         F[3:6,12:15] = self.rot
         F[3:6,-3:] = self.rot @ np.diag(ls_a)
-        F[6:9,-6:-3] = -self.rot @ np.diag(omega_n_in)
-        F[9:12,9:12] = 1 / np.array(self.config.GYO_BIA_TAU) * np.identity(3)
-        F[12:15,12:15] = 1 / np.array(self.config.ACC_BIA_TAU) * np.identity(3)
-        F[-6:-3,-6:-3] = 1 / np.array(self.config.GYO_SCF_TAU) * np.identity(3)
-        F[-3:,-3:] = 1 / np.array(self.config.ACC_SCF_TAU) * np.identity(3)
+        F[6:9,-6:-3] = -self.rot @ np.diag(ls_g)
+        F[9:12,9:12] = 1 / self.config.GYO_BIA_TAU * np.identity(3)
+        F[12:15,12:15] = 1 / self.config.ACC_BIA_TAU * np.identity(3)
+        F[-6:-3,-6:-3] = 1 / self.config.GYO_SCF_TAU * np.identity(3)
+        F[-3:,-3:] = 1 / self.config.ACC_SCF_TAU * np.identity(3)
         return np.identity(21) + F * dt
     
     def __sys_noise_cov(self):
         qw = np.zeros((18, 18))
         qw[:3,:3] = self.config.GYOARW**2 * np.identity(3)
         qw[3:6,3:6] = self.config.ACCVRW**2 * np.identity(3)
-        qw[6:9,6:9] = 2*np.array(self.config.GYO_BIA_STD)**2 / np.array(self.config.GYO_BIA_TAU) * np.identity(3)
-        qw[9:12,9:12] = 2*np.array(self.config.ACC_BIA_STD)**2 / np.array(self.config.ACC_BIA_TAU) * np.identity(3)
-        qw[-6:-3,-6:-3] = 2*np.array(self.config.GYO_SCF_STD)**2 / np.array(self.config.GYO_SCF_TAU) * np.identity(3)
-        qw[-3:,-3:] = 2*np.array(self.config.ACC_SCF_STD)**2 / np.array(self.config.ACC_SCF_TAU) * np.identity(3)
+        qw[6:9,6:9] = 2*self.config.GYO_BIA_STD**2 / self.config.GYO_BIA_TAU * np.identity(3)
+        qw[9:12,9:12] = 2*self.config.ACC_BIA_STD**2 / self.config.ACC_BIA_TAU * np.identity(3)
+        qw[-6:-3,-6:-3] = 2*self.config.GYO_SCF_STD**2 / self.config.GYO_SCF_TAU * np.identity(3)
+        qw[-3:,-3:] = 2*self.config.ACC_SCF_STD**2 / self.config.ACC_SCF_TAU * np.identity(3)
         return qw
     
     def __sys_control_mat(self):

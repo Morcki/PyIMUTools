@@ -46,7 +46,7 @@ class Config():
         self.ACC_SCF_VAL = np.array([0, 0, 0]) * 1e-6                   # unit : ppm
         
         init_rn = com.DrMat(self.init_loc) @ self.init_loc
-        self.init_x = np.diag(np.hstack((
+        self.init_x = np.hstack((
             init_rn,
             self.init_vel,
             self.init_pos,
@@ -54,7 +54,7 @@ class Config():
             self.ACC_BIA_VAL,
             self.GYO_SCF_VAL,
             self.ACC_SCF_VAL,
-            )))
+            ))
         
         self.init_Qx = np.diag(np.hstack((
             self.loc_std**2,
