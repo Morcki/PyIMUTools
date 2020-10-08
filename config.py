@@ -45,7 +45,7 @@ class Config():
         self.ACC_SCF_STD = np.array([100, 100, 100]) * 1e-6             # unit : ppm
         self.ACC_SCF_VAL = np.array([0, 0, 0]) * 1e-6                   # unit : ppm
         
-        init_rn = com.DrMat(self.init_loc) @ self.init_loc
+        init_rn = self.init_loc
         self.init_x = np.hstack((
             init_rn,
             self.init_vel,

@@ -182,6 +182,11 @@ def DrMat(loc, itype = 0):
         Dr = np.diag([1 / (Rm + loc[2]), 1 / ((Rn + loc[2]) * np.cos(loc[0])), -1])
     return Dr
 
+def rv2m(rv):
+    mat = antisym(rv)
+    mat = np.identity(3) - mat
+    return mat
+
 
 # inpos = [0.0107951084511778 * glv.D2R, -2.14251290749072 * glv.D2R, -75.7498049314083 * glv.D2R]
 # qua   = euler2quater(inpos)

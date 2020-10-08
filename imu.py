@@ -211,6 +211,13 @@ class ImuUpd():
         self.vel = []
         self.pos = []
         
+        self.gyo_bias = []
+        self.acc_bias = []
+        self.gyo_fact = []
+        self.acc_fact = []
+        
+        self.rot_ = None
+        self.qua_ = None
         self.rot = None # Rotation matrix
         self.qua = None # Quaternion
         
@@ -224,25 +231,42 @@ class ImuUpd():
         self.vel.append(self.imudata.init_vel)
         self.pos.append(self.imudata.init_pos)
         
+        self.gyo_bias = self.config.GYO_BIA_VAL
+        self.acc_bias = self.config.ACC_BIA_VAL
+        self.gyo_fact = self.config.GYO_SCF_VAL
+        self.acc_fact = self.config.ACC_SCF_VAL
+        
         self.rot = com.euler2rotation(self.pos[-1])
         self.qua = com.euler2quater(self.pos[-1])
         
         self.Qx = np.zeros((9,9))
-    
+        self.load_gnssstatus()
+        
     def load_gnssstatus(self):
+        self.gtim = []
+        self.gloc = []
+        self.gloc_std = []
         with open(self.gnssf) as f:
             for line in f:
                 linedata = [float(i) for i in line.split()]
-                t = linedata[0]
-                gnss_loc = np.asarray([linedata[1] * glv.D2R, linedata[2] * glv.D2R, linedata[3]])
-                loc_std = np.asarray(linedata[4:])
-                yield t, gnss_loc, loc_std
-        
+                self.gtim.append(linedata[0])
+                self.gloc.append([linedata[1] * glv.D2R, linedata[2] * glv.D2R, linedata[3]])
+                self.gloc_std.append(linedata[4:])
+                
+    def find_gpsref_data_index(self, index, reftime):
+        n = len(self.gtim)
+        for i in range(index, n):
+            t = self.gtim[i]
+            if t - reftime < self.imudata.intv and t > reftime:
+                return 1, i
+            elif t > reftime:
+                return 0, i
+        return 0, -1
     
-    def antenna_cor(self, imu_loc):
-        Dr_I = com.DrMat(imu_loc, 1)
-        gnss_imuloc = imu_loc + Dr_I @ self.rot @ self.config.antenna_arm
-        return gnss_imuloc
+    def antenna_cor(self, imuloc, gloc):
+        Dr_I = com.DrMat(imuloc, 1)
+        gloc_c = gloc - Dr_I @ self.rot @ self.config.antenna_arm
+        return gloc_c
     
     def updepoch_imu(self):
         for t,ls_g,ls_a in self.imudata.loadbinepoch(self.binf):
@@ -250,7 +274,7 @@ class ImuUpd():
                 continue
             self.iep += 1
             if self.iep == 1:
-                yield self.tim[-1], self.pos[-1], self.vel[-1], self.loc[-1]
+                # yield self.tim[-1], self.pos[-1], self.vel[-1], self.loc[-1]
                 continue
             self.tim.append(t)
             loc_p = self.loc[-1]
@@ -262,6 +286,8 @@ class ImuUpd():
             else:
                 vel_m = vel_p + (vel_p - self.vel[-2]) / 2
                 loc_m = loc_p + (loc_p - self.loc[-2]) / 2
+            
+            self.__cor_imu()
             
             omega_n_ie, omega_n_en = com.earthrotatvec(loc_m, vel_m)
             grav_n = com.getgravity(loc_m[0], loc_m[2])
@@ -278,9 +304,13 @@ class ImuUpd():
             vel_m = (vel_n + vel_p) / 2
             loc_m = (loc_n + loc_p) / 2
             omega_n_ie, omega_n_en = com.earthrotatvec(loc_m, vel_m)
-            q_b_n = self.__updpos(omega_n_ie, omega_n_en) 
+            q_b_n = self.__updpos(omega_n_ie, omega_n_en)
+            
+            self.qua_ = np.copy(self.qua)
+            self.rot_ = np.copy(self.rot)
             self.qua = q_b_n
             self.rot = com.quater2rotation(q_b_n)
+            
             pos_n = com.rotation2euler(self.rot)
             self.pos.append(pos_n)
             
@@ -289,37 +319,42 @@ class ImuUpd():
     def updepoch(self):
         x  = np.asarray(self.config.init_x)
         Qx = np.asarray(self.config.init_Qx)
+        gps_refdata_index = 0
         for t, pos_n, vel_n, loc_n in self.updepoch_imu():
+            cloc_n = np.copy(loc_n)
             dx = np.zeros(3 * 7)
-            PHI, Qw = self.get_status_equation_matrix()
-            # update status
-            dx_ = PHI @ dx
-            Qx_ = PHI @ Qx @ PHI.T + Qw
-            for tg, gnss_pureloc, gloc_std in self.load_gnssstatus():
-                if np.abs(t - tg) < 0.01:
-                    Dr = com.DrMat(loc_n)
-                    Hr, Rk = self.get_observation_equation_matrix(Dr @ gloc_std) 
-                    gnss_imuloc = self.antenna_cor(loc_n)
-                    Z = Dr @ (gnss_imuloc - gnss_pureloc)
-                    S = Hr @ Qx_ @ Hr.T + Rk
-                    K = Qx_ @ Hr.T @ np.linalg.inv(S)
-                    break
-                elif t < tg:
-                    Hr = np.zeros((3, 21))
-                    Z = np.zeros(3)
-                    Rk = np.zeros((3, 3))
-                    K = np.zeros((21, 3))
-                    break
-            dx = dx_ + K @ (Z - Hr @ dx_)
-            temp = np.eye(len(x)) - K @ Hr
-            Qx = temp @ Qx_ @ temp.T + K @ Rk @ K.T
-            x += dx
-            Dr_I = com.DrMat(loc_n, 1)
-            dx[:3] = Dr_I @ dx[:3]
-            for i in range(3):
-                self.loc[-1][i] += dx[i]
-                self.vel[-1][i] += dx[i + 3]
-                self.pos[-1][i] += dx[i + 6]
+            ok, gps_refdata_index = self.find_gpsref_data_index(gps_refdata_index, t)
+            if ok:
+                # update status
+                PHI, Qw = self.get_status_equation_matrix()
+                dx_ = PHI @ dx
+                Qx_ = PHI @ Qx @ PHI.T + Qw
+                gnss_pureloc = np.asarray(self.gloc[gps_refdata_index])
+                gloc_std = np.asarray(self.gloc_std[gps_refdata_index])
+                Dr = com.DrMat(cloc_n)
+                Hr, Rk = self.get_observation_equation_matrix(gloc_std)
+                gloc_c = self.antenna_cor(cloc_n, gnss_pureloc)
+                Z = Dr @ (cloc_n - gloc_c)
+                S = Hr @ Qx_ @ Hr.T + Rk
+                K = Qx_ @ Hr.T @ np.linalg.inv(S)
+                dx = dx_ + K @ (Z - Hr @ dx_)
+                temp = np.eye(len(x)) - K @ Hr
+                Qx = temp @ Qx_ @ temp.T + K @ Rk @ K.T
+            else:
+                PHI, Qw = self.get_status_equation_matrix()
+                dx = PHI @ dx
+                Qx = PHI @ Qx @ PHI.T + Qw
+            Rm,Rn = com.mcucradius(cloc_n[0])
+            dx[0] /= Rm
+            dx[1] /= (Rn * np.cos(cloc_n[0]))
+            dx[2] /= -1
+            self.loc[-1] -= dx[:3]
+            self.vel[-1] -= dx[3:6]
+            self.pos[-1] = com.rotation2euler(np.linalg.inv(com.rv2m(dx[6:9])) @ self.rot)
+            self.gyo_bias += dx[9:12]
+            self.gyo_fact += dx[12:15]
+            self.acc_bias += dx[15:18]
+            self.acc_fact += dx[18:]
             self.qua = com.euler2quater(self.pos[-1])
             self.rot = com.quater2rotation(self.qua)
             yield x, Qx
@@ -336,10 +371,15 @@ class ImuUpd():
         lb = self.config.antenna_arm
         Hr = np.zeros((3, 3*7))
         Hr[:,:3] = np.identity(3)
-        Hr[:,6:9] = com.antisym(self.rot @ lb)
+        Hr[:,6:9] = self.rot @ com.antisym(lb)
         Rk = np.diag(loc_std**2)
         return Hr, Rk
     
+    def __cor_imu(self):
+        dt = self.imudata.imu_tim[-1] - self.imudata.imu_tim[-2]
+        self.imudata.imu_acc[-1] = (self.imudata.imu_acc[-1] - self.acc_bias * dt) # / (1 + self.acc_fact)
+        self.imudata.imu_gyo[-1] = (self.imudata.imu_gyo[-1] - self.gyo_bias * dt) # / (1 + self.gyo_fact)
+        
     def __updpos(self, omega_n_ie, omega_n_en):
         dt = self.imudata.imu_tim[-1] - self.imudata.imu_tim[-2]
         
@@ -391,16 +431,16 @@ class ImuUpd():
         
         loc_n = np.array([lat, lon, h])
         return loc_n
-    
-    
+        
+        
         
     def __transfer_mat(self):
         # get transfer matrix : PHI_k/k-1
         dt = self.imudata.imu_tim[-1] - self.imudata.imu_tim[-2]
         
-        loc_n = self.loc[-1]
-        vel_n = self.vel[-1]
-        pos_n = self.pos[-1]
+        loc_n = self.loc[-2]
+        vel_n = self.vel[-2]
+        pos_n = self.pos[-2]
         
         
         lat, lon, h = loc_n
@@ -411,8 +451,8 @@ class ImuUpd():
         omega_n_ie, omega_n_en = com.earthrotatvec(loc_n, vel_n)
         omega_n_in = omega_n_ie + omega_n_en
         
-        ls_g = np.asarray(self.imudata.imu_gyo[-1])
-        ls_a = np.asarray(self.imudata.imu_acc[-1])
+        ls_g = np.asarray(self.imudata.imu_gyo[-2])
+        ls_a = np.asarray(self.imudata.imu_acc[-2])
         
         Frr = np.array([
             [-vd / (Rm + h), 0, vn / (Rm + h)],
@@ -446,34 +486,35 @@ class ImuUpd():
         F[3:6,3:6] = Fvv
         F[6:9,:3] = Fphir
         F[6:9,3:6] = Fphiv
-        F[3:6,6:9] = com.antisym(self.rot @ ls_a)
+        F[3:6,6:9] = com.antisym(self.rot_ @ ls_a)
         F[6:9,6:9] = -com.antisym(omega_n_in)
-        F[6:9,9:12] = -self.rot
-        F[3:6,12:15] = self.rot
-        F[3:6,-3:] = self.rot @ np.diag(ls_a)
-        F[6:9,-6:-3] = -self.rot @ np.diag(ls_g)
-        F[9:12,9:12] = 1 / self.config.GYO_BIA_TAU * np.identity(3)
-        F[12:15,12:15] = 1 / self.config.ACC_BIA_TAU * np.identity(3)
-        F[-6:-3,-6:-3] = 1 / self.config.GYO_SCF_TAU * np.identity(3)
-        F[-3:,-3:] = 1 / self.config.ACC_SCF_TAU * np.identity(3)
+        F[6:9,9:12] = -self.rot_
+        F[3:6,12:15] = self.rot_
+        F[3:6,-3:] = self.rot_ @ np.diag(ls_a/dt)
+        F[6:9,-6:-3] = -self.rot_ @ np.diag(ls_g/dt)
+        F[9:12,9:12] = - 1 / self.config.GYO_BIA_TAU * np.identity(3)
+        F[12:15,12:15] = - 1 / self.config.ACC_BIA_TAU * np.identity(3)
+        F[-6:-3,-6:-3] = - 1 / self.config.GYO_SCF_TAU * np.identity(3)
+        F[-3:,-3:] = - 1 / self.config.ACC_SCF_TAU * np.identity(3)
         return np.identity(21) + F * dt
     
     def __sys_noise_cov(self):
-        qw = np.zeros((18, 18))
-        qw[:3,:3] = self.config.GYOARW**2 * np.identity(3)
-        qw[3:6,3:6] = self.config.ACCVRW**2 * np.identity(3)
-        qw[6:9,6:9] = 2*self.config.GYO_BIA_STD**2 / self.config.GYO_BIA_TAU * np.identity(3)
-        qw[9:12,9:12] = 2*self.config.ACC_BIA_STD**2 / self.config.ACC_BIA_TAU * np.identity(3)
+        qw = np.zeros((21, 21))
+        qw[:3,:3]       = self.config.GYOARW**2 * np.identity(3)
+        qw[3:6,3:6]     = self.config.ACCVRW**2 * np.identity(3)
+        
+        qw[9:12,9:12]     = 2*self.config.GYO_BIA_STD**2 / self.config.GYO_BIA_TAU * np.identity(3)
+        qw[12:15,12:15]   = 2*self.config.ACC_BIA_STD**2 / self.config.ACC_BIA_TAU * np.identity(3)
         qw[-6:-3,-6:-3] = 2*self.config.GYO_SCF_STD**2 / self.config.GYO_SCF_TAU * np.identity(3)
-        qw[-3:,-3:] = 2*self.config.ACC_SCF_STD**2 / self.config.ACC_SCF_TAU * np.identity(3)
+        qw[-3:,-3:]     = 2*self.config.ACC_SCF_STD**2 / self.config.ACC_SCF_TAU * np.identity(3)
         return qw
     
     def __sys_control_mat(self):
-        gc = np.zeros((21, 18))
-        gc[3:6,:3] = self.rot
-        gc[6:9,3:6] = self.rot
-        gc[9:12,6:9] = np.identity(3)
-        gc[-9:-6,-9:-6] = np.identity(3)
-        gc[-6:-3,-6:-3] = np.identity(3)
-        gc[-3:,-3:] = np.identity(3)
+        gc = np.zeros((21, 21))
+        gc[:3,:3] = self.rot_
+        gc[3:6,3:6] = -self.rot_
+        gc[9:12,9:12] = np.identity(3)
+        gc[12:15,12:15] = np.identity(3)
+        gc[15:18,15:18] = np.identity(3)
+        gc[18:,18:] = np.identity(3)
         return gc

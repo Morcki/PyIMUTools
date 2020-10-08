@@ -185,7 +185,7 @@ imuupd.load_initstatus("./data/A15_imu.bin")
 
 
 
-with open("./data/Data1_PureINS.bin","rb") as f:
+with open("./results/m_sol.txt","w") as fw:
     for x, Qx in imuupd.updepoch():
     # for tim,euler,vel_n,loc_n in fread("./data/ref.txt"):
         # refdata = [] # time(sec), lat(rad), lon(rad), h(m), vn(m/s), ve(m/s), vd(m/s), phi(rad), theta(rad), psi(rad)
@@ -195,19 +195,16 @@ with open("./data/Data1_PureINS.bin","rb") as f:
         #     refdata.append(data_float)
         # mloc = np.array([loc_n[0] * glv.R2D, loc_n[1] * glv.R2D, loc_n[2]])
         tim = imuupd.tim[-1]
-        # mloc = np.array(imuupd.loc[-1])
-        # mvel = np.array(imuupd.vel[-1])
-        # mpos = np.array(imuupd.pos[-1]) * glv.R2D
-        # dloc = mloc - np.array(refdata[1:4])
-        # dvel = vel_n - np.array(refdata[4:7])
-        # dpos = meuler - np.array(refdata[7:])
-        # timeList.append(tim)
-        # dlocList.append(mloc)
-        # dposList.append(mvel)
-        # dvelList.append(mpos)
+        mloc = np.array(imuupd.loc[-1])
+        mloc[:2] *= glv.R2D
+        mvel = np.array(imuupd.vel[-1])
+        mpos = np.array(imuupd.pos[-1]) * glv.R2D
+        mpos[-1] += 360
+        fw.write("%10.3f %16.10f %16.10f %10.3f %10.3f %10.3f %10.3f %13.8f %13.8f %13.8f\n" % (
+            tim, *mloc, *mvel, *mpos
+            ))
         print("======================")
         print("Porcessing Time  : ", tim)
-        # print(tim, mloc, vel_n, euler);
 
 plotData(imuupd.tim,imuupd.loc,"LOC")
 plotData(imuupd.tim,imuupd.vel,"VEL")
