@@ -183,10 +183,11 @@ imuupd.load_initstatus("./data/A15_imu.bin")
 # dposList = []
 # dvelList = []
 
-
+m_gyo_bia = []
+m_acc_bia = []
 
 with open("./results/m_sol.txt","w") as fw:
-    for x, Qx in imuupd.updepoch():
+    for gyo_bia, acc_bia in imuupd.updepoch():
     # for tim,euler,vel_n,loc_n in fread("./data/ref.txt"):
         # refdata = [] # time(sec), lat(rad), lon(rad), h(m), vn(m/s), ve(m/s), vd(m/s), phi(rad), theta(rad), psi(rad)
         # for i in range(10):
@@ -205,6 +206,8 @@ with open("./results/m_sol.txt","w") as fw:
             ))
         print("======================")
         print("Porcessing Time  : ", tim)
+        m_gyo_bia.append(gyo_bia)
+        m_acc_bia.append(acc_bia)
 
 plotData(imuupd.tim,imuupd.loc,"LOC")
 plotData(imuupd.tim,imuupd.vel,"VEL")

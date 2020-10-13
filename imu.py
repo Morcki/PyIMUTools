@@ -332,6 +332,7 @@ class ImuUpd():
                 gnss_pureloc = np.asarray(self.gloc[gps_refdata_index])
                 gloc_std = np.asarray(self.gloc_std[gps_refdata_index])
                 Dr = com.DrMat(cloc_n)
+                Dr_I = com.DrMat(cloc_n, 1)
                 Hr, Rk = self.get_observation_equation_matrix(gloc_std)
                 gloc_c = self.antenna_cor(cloc_n, gnss_pureloc)
                 Z = Dr @ (cloc_n - gloc_c)
@@ -340,24 +341,20 @@ class ImuUpd():
                 dx = dx_ + K @ (Z - Hr @ dx_)
                 temp = np.eye(len(x)) - K @ Hr
                 Qx = temp @ Qx_ @ temp.T + K @ Rk @ K.T
+                dx[:3] = Dr_I @ dx[:3]
+                self.loc[-1] -= dx[:3]
+                self.vel[-1] -= dx[3:6]
+                self.pos[-1] = com.rotation2euler(np.linalg.inv(com.rv2m(dx[6:9])) @ self.rot)
+                self.gyo_bias += dx[9:12]
+                self.gyo_fact += dx[12:15]
+                self.acc_bias += dx[15:18]
+                self.acc_fact += dx[18:]
+                self.qua = com.euler2quater(self.pos[-1])
+                self.rot = com.quater2rotation(self.qua)
             else:
                 PHI, Qw = self.get_status_equation_matrix()
-                dx = PHI @ dx
                 Qx = PHI @ Qx @ PHI.T + Qw
-            Rm,Rn = com.mcucradius(cloc_n[0])
-            dx[0] /= Rm
-            dx[1] /= (Rn * np.cos(cloc_n[0]))
-            dx[2] /= -1
-            self.loc[-1] -= dx[:3]
-            self.vel[-1] -= dx[3:6]
-            self.pos[-1] = com.rotation2euler(np.linalg.inv(com.rv2m(dx[6:9])) @ self.rot)
-            self.gyo_bias += dx[9:12]
-            self.gyo_fact += dx[12:15]
-            self.acc_bias += dx[15:18]
-            self.acc_fact += dx[18:]
-            self.qua = com.euler2quater(self.pos[-1])
-            self.rot = com.quater2rotation(self.qua)
-            yield x, Qx
+            yield self.gyo_bias, self.acc_bias
             
     
     def get_status_equation_matrix(self):
@@ -377,8 +374,8 @@ class ImuUpd():
     
     def __cor_imu(self):
         dt = self.imudata.imu_tim[-1] - self.imudata.imu_tim[-2]
-        self.imudata.imu_acc[-1] = (self.imudata.imu_acc[-1] - self.acc_bias * dt) # / (1 + self.acc_fact)
-        self.imudata.imu_gyo[-1] = (self.imudata.imu_gyo[-1] - self.gyo_bias * dt) # / (1 + self.gyo_fact)
+        self.imudata.imu_acc[-1] = (self.imudata.imu_acc[-1] - self.acc_bias * dt) / (1 + self.acc_fact)
+        self.imudata.imu_gyo[-1] = (self.imudata.imu_gyo[-1] - self.gyo_bias * dt) / (1 + self.gyo_fact)
         
     def __updpos(self, omega_n_ie, omega_n_en):
         dt = self.imudata.imu_tim[-1] - self.imudata.imu_tim[-2]
